@@ -1,0 +1,167 @@
+// ==UserScript==
+// @name         Civitai: Add "Copy Workflow" Button (v3.6)
+// @namespace    http://tampermonkey.net/
+// @version      3.6
+// @description  Adds a teal, round button next to the download icon to copy ComfyUI workflow.
+// @author       IMGNR
+// @match        https://civitai.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- UTILITY: Toast Notification ---
+    function showToast(message, type = 'success') {
+        const existing = document.getElementById('comfy-toast');
+        if (existing) existing.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'comfy-toast';
+        toast.textContent = message;
+        const bgColor = type === 'success' ? '#2f9e44' : '#e03131';
+
+        toast.style.cssText = `
+            position: fixed; bottom: 80px; right: 20px;
+            background-color: ${bgColor}; color: white;
+            padding: 10px 20px; border-radius: 6px; z-index: 100000;
+            font-family: system-ui, -apple-system, sans-serif; font-size: 14px; font-weight: 600;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none;
+            opacity: 0; transform: translateY(10px); transition: all 0.2s ease;
+        `;
+        document.body.appendChild(toast);
+
+        requestAnimationFrame(() => {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateY(0)';
+        });
+
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // --- UTILITY: PNG Parser ---
+    function extractPngMetadata(arrayBuffer) {
+        try {
+            const dataView = new DataView(arrayBuffer);
+            let offset = 8;
+            const textDecoder = new TextDecoder('utf-8');
+            while (offset < dataView.byteLength) {
+                const length = dataView.getUint32(offset);
+                const type = textDecoder.decode(new Uint8Array(arrayBuffer, offset + 4, 4));
+                if (type === 'tEXt' || type === 'iTXt') {
+                    const chunkData = new Uint8Array(arrayBuffer, offset + 8, length);
+                    let text = textDecoder.decode(chunkData).replace(/\0/g, ' ');
+                    if (text.includes('workflow') || text.includes('"nodes":')) {
+                        const first = text.indexOf('{');
+                        const last = text.lastIndexOf('}');
+                        if (first !== -1 && last > first) return text.substring(first, last + 1);
+                    }
+                }
+                offset += 4 + 4 + length + 4;
+            }
+        } catch (e) { console.error(e); }
+        return null;
+    }
+
+    // --- LOGIC: Find the Main Image ---
+    function findMainImage() {
+        // Strategy 1: Modal
+        const modalImg = document.querySelector('.mantine-Modal-root img[src*="civitai"]');
+        if (modalImg) return modalImg;
+
+        // Strategy 2: Largest Image
+        const allImages = Array.from(document.querySelectorAll('img[src*="civitai"]'));
+        const candidates = allImages.filter(img => img.clientWidth > 200);
+
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => (b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
+            return candidates[0];
+        }
+
+        return null;
+    }
+
+    // --- ACTION: Fetch & Copy ---
+    function fetchAndCopyWorkflow(imgUrl) {
+        if (!imgUrl) return showToast('No image found.', 'error');
+        showToast('Fetching Metadata...', 'success');
+
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: imgUrl.split('?')[0],
+            responseType: "arraybuffer",
+            onload: (res) => {
+                if (res.status === 200) {
+                    const wf = extractPngMetadata(res.response);
+                    if (wf) {
+                        GM_setClipboard(wf);
+                        showToast('Workflow JSON copied!', 'success');
+                    } else {
+                        showToast('No workflow metadata found.', 'error');
+                    }
+                } else showToast('Fetch failed.', 'error');
+            }
+        });
+    }
+
+    // --- UI INJECTION ---
+    function injectButton() {
+        const downloadIcons = document.querySelectorAll('svg.tabler-icon-download, .icon-tabler-download');
+
+        downloadIcons.forEach(icon => {
+            const buttonWrapper = icon.closest('button, a, .mantine-ActionIcon-root');
+            if (!buttonWrapper) return;
+
+            const container = buttonWrapper.parentElement;
+            if (!container) return;
+
+            if (container.querySelector('.comfy-copy-btn')) return;
+            if (buttonWrapper.clientWidth > 100) return;
+
+            const btn = document.createElement('button');
+            btn.className = 'comfy-copy-btn';
+            btn.title = 'Copy ComfyUI Workflow';
+
+            btn.style.cssText = `
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 36px;
+                height: 36px;
+                flex-shrink: 0;
+                margin-left: 6px;
+                cursor: pointer;
+                background-color: #08B5A7;
+                border: none;
+                border-radius: 50%;
+                color: white;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+                z-index: 10;
+                box-sizing: border-box;
+                padding: 0;
+            `;
+
+            btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M7 8l-4 4l4 4"/><path d="M17 8l4 4l-4 4"/><path d="M14 4l-4 16"/></svg>`;
+
+            btn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const img = findMainImage();
+                if (img) fetchAndCopyWorkflow(img.src);
+                else showToast('Could not find image element.', 'error');
+            };
+
+            container.insertBefore(btn, buttonWrapper.nextSibling);
+        });
+    }
+
+    // --- OBSERVER ---
+    const observer = new MutationObserver(() => injectButton());
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
