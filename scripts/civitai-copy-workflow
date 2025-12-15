@@ -1,0 +1,135 @@
+// ==UserScript==
+// @name         Civitai: Copy ComfyUI Workflow
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Downloads the image and copies the embedded workflow (JSON) to clipboard when downloading from Civitai.
+// @author       IMGNR
+// @match        https://civitai.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Disable debug logs for daily use
+    const DEBUG = false;
+
+    function log(msg, data = null) {
+        if (DEBUG) {
+            if (data) console.log(`[Civitai-Script] ${msg}`, data);
+            else console.log(`[Civitai-Script] ${msg}`);
+        }
+    }
+
+    // --- UTILITY: Toast Notification ---
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.textContent = message;
+        const bgColor = type === 'success' ? '#2f9e44' : '#e03131';
+        toast.style.cssText = `
+            position: fixed; bottom: 20px; right: 20px;
+            background-color: ${bgColor}; color: white;
+            padding: 12px 24px; border-radius: 8px; z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 14px; font-weight: 600;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            pointer-events: none; opacity: 0; transform: translateY(20px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        `;
+        document.body.appendChild(toast);
+
+        // Animate In
+        requestAnimationFrame(() => {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateY(0)';
+        });
+
+        // Animate Out
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(20px)';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // --- UTILITY: PNG Parser ---
+    function extractPngMetadata(arrayBuffer) {
+        try {
+            const dataView = new DataView(arrayBuffer);
+            let offset = 8;
+            const textDecoder = new TextDecoder('utf-8');
+
+            while (offset < dataView.byteLength) {
+                const length = dataView.getUint32(offset);
+                const type = textDecoder.decode(new Uint8Array(arrayBuffer, offset + 4, 4));
+
+                if (type === 'tEXt' || type === 'iTXt') {
+                    const chunkData = new Uint8Array(arrayBuffer, offset + 8, length);
+                    let text = textDecoder.decode(chunkData);
+                    const cleanText = text.replace(/\0/g, ' ');
+
+                    if (cleanText.includes('workflow') || cleanText.includes('"nodes":')) {
+                        const firstBrace = text.indexOf('{');
+                        const lastBrace = text.lastIndexOf('}');
+                        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+                            return text.substring(firstBrace, lastBrace + 1);
+                        }
+                    }
+                }
+                offset += 4 + 4 + length + 4;
+            }
+        } catch (e) {
+            log("Error parsing PNG chunks", e);
+        }
+        return null;
+    }
+
+    // --- MAIN LOGIC ---
+    document.addEventListener('click', function(e) {
+        const target = e.target.closest('a, button, div[role="button"], .mantine-Menu-item');
+        if (!target) return;
+
+        const textContent = (target.innerText || '').toLowerCase();
+        const href = (target.getAttribute('href') || '');
+        const iconCheck = target.querySelector('.tabler-icon-download, svg[class*="icon-download"]');
+
+        const isDownload =
+            textContent.includes('download') ||
+            href.includes('/api/download') ||
+            iconCheck !== null;
+
+        if (!isDownload) return;
+
+        // Find the visible main image (ignoring avatars)
+        const images = Array.from(document.querySelectorAll('img[src*="civitai"]'))
+            .filter(img => !img.src.includes('avatar') && img.width > 200);
+
+        let mainImage = images.find(img => img.closest('.mantine-Modal-root, .mantine-Carousel-slide'));
+        if (!mainImage && images.length > 0) mainImage = images[0];
+
+        if (mainImage) {
+            // Strip query params to get the full original image
+            let cleanUrl = mainImage.src.split('?')[0];
+
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: cleanUrl,
+                responseType: "arraybuffer",
+                onload: function(response) {
+                    if (response.status === 200) {
+                        const workflow = extractPngMetadata(response.response);
+                        if (workflow) {
+                            GM_setClipboard(workflow);
+                            showToast('Workflow JSON copied!', 'success');
+                        } else {
+                            // Only show error toast if you want to know when it fails
+                            showToast('No workflow found in image', 'error');
+                        }
+                    }
+                }
+            });
+        }
+    }, true);
+})();
